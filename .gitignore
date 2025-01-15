@@ -1,3 +1,4 @@
 main
+.vscode
 *.json
-seetings.json
+.vscode/settings.json
