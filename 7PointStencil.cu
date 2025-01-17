@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <chrono>
 
 // constant struct to pass to device
 struct constants {
@@ -20,12 +21,94 @@ struct constants {
 // initializing device constants
 __constant__ constants deviceConstants;
 
+/*
+Helper for printing the values in a (cubic) 3D array
+in a visually clear way.
+*/
+void print3DArr(const double* arr, int size){
+
+    if (size > 6) return;
+
+    std::cout << std::fixed << std::setprecision(1);
+
+    std::cout << "[\n";
+    for (int j = 0; j < size; j++) {
+        for (int i = 0; i < size; i++) {
+            for (int k = 0; k < size; k++){
+
+                int idx = i * size * size + j * size + k;
+                std::cout <<    arr[idx] << " ";
+
+            }
+            std::cout << "   ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "]\n";
+}
+
+/*
+@brief
+Simulates the heat transfer equations using finite-difference approximation of the derivative.
+dT/dt = alpha*dT^2/d(x,y,z)
+Does so in parallel for each point using the 7-point stencil. Expects pointers to two (cubic) arrays of equal dimension. 
+
+@param temperature_ptr CUDA 3D ptr to initial condition data
+@param gradient_ptr CUDA 3D ptr to memory used for gradient storage
+*/
+__global__ void calculateGradient(double* temperature_ptr,double* gradient_ptr) {
+
+    // getting unique indices in the three directions
+    // (+1 because outer-faces are fixed for dirichlet conditions)
+    int x = threadIdx.x + blockIdx.x * blockDim.x + 1;
+    int y = threadIdx.y + blockIdx.y * blockDim.y + 1;
+    int z = threadIdx.z + blockIdx.z * blockDim.z + 1;
+
+    int size = deviceConstants.size;
+
+    // Out-of-bounds check
+    if (x >= size - 1 || y >= size - 1 || z >= size - 1) return; 
+
+    int idx = z * size * size + y * size + x;
+
+    // accessing values for 7-point stencil
+    double left   = temperature_ptr[(z * size * size) + y * size + (x - 1)];
+    double right  = temperature_ptr[(z * size * size) + y * size + (x + 1)];
+    double down   = temperature_ptr[(z * size * size) + (y - 1) * size + x];
+    double up     = temperature_ptr[(z * size * size) + (y + 1) * size + x];
+    double below  = temperature_ptr[((z - 1) * size * size) + y * size + x];
+    double above  = temperature_ptr[((z + 1) * size * size) + y * size + x];
+    double center = temperature_ptr[idx];  // current position
+
+    // approximate gradient dT/dt
+    gradient_ptr[idx] = deviceConstants.alpha * (1 /(2 * deviceConstants.delta_x)) * 
+                                    (left + right + down + up + below + above - 6 * center);
+
+}
+
+__global__ void updateTemperature(double* temperature_ptr,double* gradient_ptr) {
+
+    int x = threadIdx.x + blockIdx.x * blockDim.x + 1;
+    int y = threadIdx.y + blockIdx.y * blockDim.y + 1;
+    int z = threadIdx.z + blockIdx.z * blockDim.z + 1;
+    int size = deviceConstants.size;
+    int idx = z * size * size + y * size + x;
+
+    if (x >= size - 1 || y >= size - 1 || z >= size - 1) return; 
+
+    // update temperatures as Tn = Tn-1 + dT/dt * dt
+    temperature_ptr[idx] = temperature_ptr[idx] + gradient_ptr[idx] * deviceConstants.delta_t;
+}
+
 int main() {
+
+    // begin timing measurement
+    auto start = std::chrono::high_resolution_clock::now();
     
     // defining constants for test
     const constants hostConstants = 
     {
-        size: 5,
+        size:128,
         T: 5000,
         alpha: 0.1,
         delta_t: 0.01,
@@ -119,83 +202,11 @@ int main() {
     cudaFree(gradient_ptr);
     delete[] temperatures;
 
+    // Calculate elapsed time in milliseconds
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    std::cout << "Execution time: " << duration << " ms" << std::endl;
+
     return 0;
-}
-
-
-/*
-Helper for printing the values in a (cubic) 3D array
-in a visually clear way.
-*/
-void print3DArr(const double* arr, int size){
-
-    std::cout << std::fixed << std::setprecision(1);
-
-    std::cout << "[\n";
-    for (int j = 0; j < size; j++) {
-        for (int i = 0; i < size; i++) {
-            for (int k = 0; k < size; k++){
-
-                int idx = i * size * size + j * size + k;
-                std::cout <<    arr[idx] << " ";
-
-            }
-            std::cout << "   ";
-        }
-        std::cout << "\n";
-    }
-    std::cout << "]\n";
-}
-
-/*
-@brief
-Simulates the heat transfer equations using finite-difference approximation of the derivative.
-dT/dt = alpha*dT^2/d(x,y,z)
-Does so in parallel for each point using the 7-point stencil. Expects pointers to two (cubic) arrays of equal dimension. 
-
-@param temperature_ptr CUDA 3D ptr to initial condition data
-@param gradient_ptr CUDA 3D ptr to memory used for gradient storage
-*/
-__global__ void calculateGradient(double* temperature_ptr,double* gradient_ptr) {
-
-    // getting unique indices in the three directions
-    // (+1 because outer-faces are fixed for dirichlet conditions)
-    int x = threadIdx.x + blockIdx.x * blockDim.x + 1;
-    int y = threadIdx.y + blockIdx.y * blockDim.y + 1;
-    int z = threadIdx.z + blockIdx.z * blockDim.z + 1;
-
-    int size = deviceConstants.size;
-
-    // Out-of-bounds check
-    if (x >= size - 1 || y >= size - 1 || z >= size - 1) return; 
-
-    int idx = z * size * size + y * size + x;
-
-    // accessing values for 7-point stencil
-    double left   = temperature_ptr[(z * size * size) + y * size + (x - 1)];
-    double right  = temperature_ptr[(z * size * size) + y * size + (x + 1)];
-    double down   = temperature_ptr[(z * size * size) + (y - 1) * size + x];
-    double up     = temperature_ptr[(z * size * size) + (y + 1) * size + x];
-    double below  = temperature_ptr[((z - 1) * size * size) + y * size + x];
-    double above  = temperature_ptr[((z + 1) * size * size) + y * size + x];
-    double center = temperature_ptr[idx];  // current position
-
-    // approximate gradient dT/dt
-    gradient_ptr[idx] = deviceConstants.alpha * (1 /(2 * deviceConstants.delta_x)) * 
-                                    (left + right + down + up + below + above - 6 * center);
-
-}
-
-__global__ void updateTemperature(double* temperature_ptr,double* gradient_ptr) {
-
-    int x = threadIdx.x + blockIdx.x * blockDim.x + 1;
-    int y = threadIdx.y + blockIdx.y * blockDim.y + 1;
-    int z = threadIdx.z + blockIdx.z * blockDim.z + 1;
-    int size = deviceConstants.size;
-    int idx = z * size * size + y * size + x;
-
-    if (x >= size - 1 || y >= size - 1 || z >= size - 1) return; 
-
-    // update temperatures as Tn = Tn-1 + dT/dt * dt
-    temperature_ptr[idx] = temperature_ptr[idx] + gradient_ptr[idx] * deviceConstants.delta_t;
 }
