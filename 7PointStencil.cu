@@ -21,6 +21,8 @@ struct constants {
 // initializing device constants
 __constant__ constants deviceConstants;
 
+const int size = 128;
+
 /*
 Helper for printing the values in a (cubic) 3D array
 in a visually clear way.
@@ -58,31 +60,50 @@ Does so in parallel for each point using the 7-point stencil. Expects pointers t
 */
 __global__ void calculateGradient(double* temperature_ptr,double* gradient_ptr) {
 
+    int size = deviceConstants.size;
+    // creating shared memory for repeated access data
+    extern __shared__ double s_temperatures[];
+
     // getting unique indices in the three directions
     // (+1 because outer-faces are fixed for dirichlet conditions)
-    int x = threadIdx.x + blockIdx.x * blockDim.x + 1;
-    int y = threadIdx.y + blockIdx.y * blockDim.y + 1;
-    int z = threadIdx.z + blockIdx.z * blockDim.z + 1;
-
-    int size = deviceConstants.size;
-
+    int global_x = threadIdx.x + blockIdx.x * blockDim.x + 1;
+    int global_y = threadIdx.y + blockIdx.y * blockDim.y + 1;
+    int global_z = threadIdx.z + blockIdx.z * blockDim.z + 1;
+    int global_idx = global_z * size * size + global_y * size + global_x;
     // Out-of-bounds check
-    if (x >= size - 1 || y >= size - 1 || z >= size - 1) return; 
+    if (global_x >= size - 1 || global_y >= size - 1 || global_z >= size - 1) return; 
 
-    int idx = z * size * size + y * size + x;
+    // moving repeated access memory to shared memory
+    int local_idx = threadIdx.z * size * size + threadIdx.y * size + threadIdx.z;
+    s_temperatures[local_idx] = temperature_ptr[global_idx];
 
     // accessing values for 7-point stencil
-    double left   = temperature_ptr[(z * size * size) + y * size + (x - 1)];
-    double right  = temperature_ptr[(z * size * size) + y * size + (x + 1)];
-    double down   = temperature_ptr[(z * size * size) + (y - 1) * size + x];
-    double up     = temperature_ptr[(z * size * size) + (y + 1) * size + x];
-    double below  = temperature_ptr[((z - 1) * size * size) + y * size + x];
-    double above  = temperature_ptr[((z + 1) * size * size) + y * size + x];
-    double center = temperature_ptr[idx];  // current position
+    // each direction accesses from shared memory if available
+    // otherwise from global memory
+    double left, right, down, up, inwards, outwards, center;
+    // across x
+    if (threadIdx.x == 0) {left = temperature_ptr[(global_z * size * size) + global_y * size + (global_x - 1)];}
+    else {left = s_temperatures[local_idx - 1];}
+    if (threadIdx.x == blockDim.x - 1) {right = temperature_ptr[(global_z * size * size) + global_y * size + (global_x + 1)];}
+    else {right = s_temperatures[local_idx + 1];}
+
+    // across y
+    if (threadIdx.y == 0) {down = temperature_ptr[(global_z * size * size) + (global_y - 1) * size + global_x];}
+    else {down = s_temperatures[local_idx - size * 1];}
+    if (threadIdx.y == blockDim.y - 1){ up = temperature_ptr[(global_z * size * size) + (global_y + 1) * size + global_x];}
+    else { up = s_temperatures[local_idx + size * 1];}
+
+    // across z
+    if (threadIdx.z == 0) { inwards = temperature_ptr[((global_z - 1) * size * size) + global_y * size + global_x];}
+    else { inwards = s_temperatures[local_idx - size * size * 1];}
+    if (threadIdx.z == blockDim.z - 1){ outwards = temperature_ptr[((global_z + 1) * size * size) + global_y * size + global_x];;}
+    else {outwards = s_temperatures[local_idx + size * size * 1];}
+
+    center = s_temperatures[local_idx];  // current position
 
     // approximate gradient dT/dt
-    gradient_ptr[idx] = deviceConstants.alpha * (1 /(2 * deviceConstants.delta_x)) * 
-                                    (left + right + down + up + below + above - 6 * center);
+    gradient_ptr[global_idx] = deviceConstants.alpha * (1 /(2 * deviceConstants.delta_x)) * 
+                                    (left + right + down + up + inwards + outwards - 6 * center);
 
 }
 
@@ -108,15 +129,12 @@ int main() {
     // defining constants for test
     const constants hostConstants = 
     {
-        size:128,
+        size:size,
         T: 5000,
         alpha: 0.1,
         delta_t: 0.01,
         delta_x: 0.1
     };
-    
-    // redefined here for code readability later
-    int size = hostConstants.size;
     
     // creating temperatures on host memory
     double* temperatures = new double[size * size * size];
@@ -178,7 +196,7 @@ int main() {
     // call kernel here
     for (int t = 1; t < hostConstants.T; t += 1) {
 
-        calculateGradient<<<numBlocks, threadsPerBlock>>>(temperature_ptr, gradient_ptr);
+        calculateGradient<<<numBlocks, threadsPerBlock, arrSize>>>(temperature_ptr, gradient_ptr);
         cudaDeviceSynchronize();
 
         updateTemperature<<<numBlocks, threadsPerBlock>>>(temperature_ptr, gradient_ptr);
