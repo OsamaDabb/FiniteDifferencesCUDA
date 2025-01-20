@@ -175,10 +175,10 @@ int main() {
     // defining thread/block counts
     // (size - 2)^3 total workers (ignoring the far end of each face)
     // count of blocks is ceil ((size - 2) / 16)^3 since each block is 16^3 threads
-    int blockCount = ceil((size - 2) / 16.0);
+    int blockCount = ceil((size - 2) / 8.0);
     dim3 numBlocks(blockCount, blockCount, blockCount);
 
-    int threadsCount = min(16, size - 2);
+    int threadsCount = min(8, size - 2);
     dim3 threadsPerBlock(threadsCount, threadsCount, threadsCount);
 
     // display initial conditions
